@@ -57,10 +57,19 @@
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
 #include <openssl/rc4.h>
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
 #define HMAC_setup(ctx, key, len)	HMAC_CTX_init(&ctx); HMAC_Init_ex(&ctx, (unsigned char *)key, len, EVP_sha256(), 0)
 #define HMAC_crunch(ctx, buf, len)	HMAC_Update(&ctx, (unsigned char *)buf, len)
 #define HMAC_finish(ctx, dig, dlen)	HMAC_Final(&ctx, (unsigned char *)dig, &dlen);
 #define HMAC_close(ctx)	HMAC_CTX_cleanup(&ctx)
+#else
+#include <openssl/ossl_typ.h>
+#define HMAC_setup(ctx, key, len)	ctx = HMAC_CTX_new(); HMAC_Init_ex(ctx, (unsigned char *)key, len, EVP_sha256(), 0)
+#define HMAC_crunch(ctx, buf, len)	HMAC_Update(ctx, (unsigned char *)buf, len)
+#define HMAC_finish(ctx, dig, dlen)	HMAC_Final(ctx, (unsigned char *)dig, &dlen)
+#define HMAC_close(ctx)	HMAC_CTX_free(ctx)
+#endif
+
 #endif
 
 extern void RTMP_TLS_Init();
@@ -298,7 +307,11 @@ leave:
 struct info
 {
   z_stream *zs;
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
   HMAC_CTX ctx;
+#else
+  HMAC_CTX* ctx;
+#endif
   int first;
   int zlib;
   int size;
@@ -588,7 +601,7 @@ RTMP_HashSWF(const char *url, unsigned int *size, unsigned char *hash,
       ctim = cnow - ctim;
       ctim /= 3600 * 24;	/* seconds to days */
       if (ctim < age)		/* ok, it's new enough */
-	goto out;
+        goto out;
     }
 
   in.first = 1;
@@ -604,60 +617,60 @@ RTMP_HashSWF(const char *url, unsigned int *size, unsigned char *hash,
   inflateEnd(&zs);
 
   if (httpres != HTTPRES_OK && httpres != HTTPRES_OK_NOT_MODIFIED)
-    {
+  {
       ret = -1;
       if (httpres == HTTPRES_LOST_CONNECTION)
-	RTMP_Log(RTMP_LOGERROR, "%s: connection lost while downloading swfurl %s",
-	    __FUNCTION__, url);
+      RTMP_Log(RTMP_LOGERROR, "%s: connection lost while downloading swfurl %s",
+          __FUNCTION__, url);
       else if (httpres == HTTPRES_NOT_FOUND)
-	RTMP_Log(RTMP_LOGERROR, "%s: swfurl %s not found", __FUNCTION__, url);
+      RTMP_Log(RTMP_LOGERROR, "%s: swfurl %s not found", __FUNCTION__, url);
       else
-	RTMP_Log(RTMP_LOGERROR, "%s: couldn't contact swfurl %s (HTTP error %d)",
-	    __FUNCTION__, url, http.status);
-    }
+        RTMP_Log(RTMP_LOGERROR, "%s: couldn't contact swfurl %s (HTTP error %d)",
+          __FUNCTION__, url, http.status);
+  }
   else
+  {
+    if (got && pos)
+      fseek(f, pos, SEEK_SET);
+    else
     {
-      if (got && pos)
-	fseek(f, pos, SEEK_SET);
+      char *q;
+      if (!f)
+        f = fopen(path, "w");
+      if (!f)
+        {
+          int err = errno;
+          RTMP_Log(RTMP_LOGERROR,
+        "%s: couldn't open %s for writing, errno %d (%s)",
+        __FUNCTION__, path, err, strerror(err));
+          ret = -1;
+          goto out;
+        }
+      fseek(f, 0, SEEK_END);
+      q = strchr(url, '?');
+      if (q)
+        i = q - url;
       else
-	{
-	  char *q;
-	  if (!f)
-	    f = fopen(path, "w");
-	  if (!f)
-	    {
-	      int err = errno;
-	      RTMP_Log(RTMP_LOGERROR,
-		  "%s: couldn't open %s for writing, errno %d (%s)",
-		  __FUNCTION__, path, err, strerror(err));
-	      ret = -1;
-	      goto out;
-	    }
-	  fseek(f, 0, SEEK_END);
-	  q = strchr(url, '?');
-	  if (q)
-	    i = q - url;
-	  else
-	    i = strlen(url);
+        i = strlen(url);
 
-	  fprintf(f, "url: %.*s\n", i, url);
-	}
-      strtime(&cnow, cctim);
-      fprintf(f, "ctim: %s\n", cctim);
-
-      if (!in.first)
-	{
-	  HMAC_finish(in.ctx, hash, hlen);
-	  *size = in.size;
-
-	  fprintf(f, "date: %s\n", date);
-	  fprintf(f, "size: %08x\n", in.size);
-	  fprintf(f, "hash: ");
-	  for (i = 0; i < SHA256_DIGEST_LENGTH; i++)
-	    fprintf(f, "%02x", hash[i]);
-	  fprintf(f, "\n");
-	}
+      fprintf(f, "url: %.*s\n", i, url);
     }
+    strtime(&cnow, cctim);
+    fprintf(f, "ctim: %s\n", cctim);
+
+    if (!in.first)
+    {
+      HMAC_finish(in.ctx, hash, hlen);
+      *size = in.size;
+
+      fprintf(f, "date: %s\n", date);
+      fprintf(f, "size: %08x\n", in.size);
+      fprintf(f, "hash: ");
+      for (i = 0; i < SHA256_DIGEST_LENGTH; i++)
+        fprintf(f, "%02x", hash[i]);
+      fprintf(f, "\n");
+    }
+  }
   HMAC_close(in.ctx);
 out:
   free(path);
